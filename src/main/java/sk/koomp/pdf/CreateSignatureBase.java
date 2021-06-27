@@ -32,14 +32,17 @@ import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.Enumeration;
+import java.util.Hashtable;
+import java.util.Map;
 
 import org.apache.pdfbox.pdmodel.interactive.digitalsignature.SignatureInterface;
 import org.bouncycastle.asn1.ASN1EncodableVector;
 import org.bouncycastle.asn1.DERSet;
 import org.bouncycastle.asn1.cms.Attribute;
 import org.bouncycastle.asn1.cms.AttributeTable;
-import org.bouncycastle.asn1.ess.ESSCertID;
-import org.bouncycastle.asn1.ess.SigningCertificate;
+import org.bouncycastle.asn1.cms.CMSAttributes;
+import org.bouncycastle.asn1.ess.ESSCertIDv2;
+import org.bouncycastle.asn1.ess.SigningCertificateV2;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.GeneralName;
@@ -52,7 +55,7 @@ import org.bouncycastle.cms.CMSSignedData;
 import org.bouncycastle.cms.CMSSignedDataGenerator;
 import org.bouncycastle.cms.DefaultSignedAttributeTableGenerator;
 import org.bouncycastle.cms.SignerInfoGenerator;
-import org.bouncycastle.cms.jcajce.JcaSignerInfoGeneratorBuilder;
+import org.bouncycastle.cms.SignerInfoGeneratorBuilder;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.DigestCalculatorProvider;
@@ -155,7 +158,7 @@ public abstract class CreateSignatureBase implements SignatureInterface {
 			X509Certificate cert = (X509Certificate) certificateChain[0];
 
 			// hash alg
-			MessageDigest md = MessageDigest.getInstance("SHA1");
+			MessageDigest md = MessageDigest.getInstance("SHA-256");
 
 			byte[] derCert = cert.getEncoded();
 			md.update(derCert);
@@ -169,33 +172,43 @@ public abstract class CreateSignatureBase implements SignatureInterface {
 			IssuerSerial theIssuerSerial = new IssuerSerial(generalNames, serialNumber);
 
 			// v2 MessageDigest alg needs to be SHA-256 then
-			// sha256 with rsa encryption oid 1.2.840.113549.1.1.11
-//			ESSCertIDv2 essCert = new ESSCertIDv2(
-//					new AlgorithmIdentifier(new ASN1ObjectIdentifier("1.2.840.113549.1.1.11"), DERNull.INSTANCE),
-//					certDigest, theIssuerSerial);
-//
-//			SigningCertificateV2 signingCertificateV2 = new SigningCertificateV2(essCert);
-//			Attribute attribute = new Attribute(PKCSObjectIdentifiers.id_aa_signingCertificateV2,
-//					new DERSet(signingCertificateV2));
+			// sha256 with rsa encryption oid 1.2.840.113549.1.1.11 which is default in
+			// ESSCertIDv2
+			ESSCertIDv2 essCert = new ESSCertIDv2(null, certDigest, theIssuerSerial);
 
-			final ESSCertID essCertID = new ESSCertID(certDigest, theIssuerSerial);
-			SigningCertificate signingCertificate = new SigningCertificate(essCertID);
-			Attribute attribute = new Attribute(PKCSObjectIdentifiers.id_aa_signingCertificate,
-					new DERSet(signingCertificate));
+			SigningCertificateV2 signingCertificateV2 = new SigningCertificateV2(essCert);
+			Attribute attribute = new Attribute(PKCSObjectIdentifiers.id_aa_signingCertificateV2,
+					new DERSet(signingCertificateV2));
+
+//			v1 uses SHA1
+//			final ESSCertID essCertID = new ESSCertID(certDigest, theIssuerSerial);
+//			SigningCertificate signingCertificate = new SigningCertificate(essCertID);
+//			Attribute attribute = new Attribute(PKCSObjectIdentifiers.id_aa_signingCertificate,
+//					new DERSet(signingCertificate));
 
 			// SignedAttributeTableGenerator
 			ASN1EncodableVector signedAttributes = new ASN1EncodableVector();
 			signedAttributes.add(attribute);
 			AttributeTable attributeTable = new AttributeTable(signedAttributes);
 			DefaultSignedAttributeTableGenerator attributeTableGenerator = new DefaultSignedAttributeTableGenerator(
-					attributeTable);
+					attributeTable) {
+				@Override
+				protected Hashtable createStandardAttributeTable(Map parameters) {
+					Hashtable h = super.createStandardAttributeTable(parameters);
+					// remove 1.2.840.113549.1.9.5 from default attributes. signing time shall be
+					// not present (ETSI ETSI EN 319 142-1 V1.1.1)
+					h.remove(CMSAttributes.signingTime);
+					return h;
+				}
+			};
 
-			ContentSigner sha1Signer = new JcaContentSignerBuilder("SHA256WithRSA").build(privateKey);
 			Provider p = new BouncyCastleProvider();
+			ContentSigner sha1Signer = new JcaContentSignerBuilder("SHA256WithRSA").setProvider(p).build(privateKey);
 			DigestCalculatorProvider digestProvider = new JcaDigestCalculatorProviderBuilder().setProvider(p).build();
 
-			SignerInfoGenerator signerInfoGenerator = new JcaSignerInfoGeneratorBuilder(digestProvider)
-					.setSignedAttributeGenerator(attributeTableGenerator).build(sha1Signer, cert);
+			SignerInfoGenerator signerInfoGenerator = new SignerInfoGeneratorBuilder(digestProvider)
+					.setSignedAttributeGenerator(attributeTableGenerator)
+					.build(sha1Signer, new X509CertificateHolder(cert.getEncoded()));
 
 			gen.addSignerInfoGenerator(signerInfoGenerator);
 			gen.addCertificates(new JcaCertStore(Arrays.asList(certificateChain)));
